@@ -1,16 +1,25 @@
 """SpecGuard's command surface.
 
-Only ``generate`` exists today; ``baseline``, ``guard`` and ``run`` arrive with
-the Guard half. Generation is the only command that can involve a model — Guard
-is deliberately LLM-free.
+Generation is the only command that can involve a model. ``baseline`` and
+``guard`` are deliberately LLM-free: the thing that decides whether your API
+drifted has to be reproducible.
 """
 
+import json
+import os
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 import click
 
 from . import __version__
+from .baseline_store import build_baseline, load_baseline, write_baseline
 from .case_designer import design_cases
+from .drift_engine import BREAKING, INFO, WARNING, diff
+from .reporter import console_report, exceeds_threshold, junit_report, summarise, write_report
+from .schema_inferer import infer
 from .spec_parser import parse_spec
 from .test_renderer import render_suite
 
@@ -66,3 +75,167 @@ def generate(spec: Path, out: Path, base_url: str) -> None:
         "into your real suite.",
         fg="cyan",
     )
+
+
+# --- the Guard half ---------------------------------------------------------
+
+_spec_option = click.option(
+    "--spec",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Spec to read routes from, so /pets/p_1 is filed under /pets/{petId}.",
+)
+_suite_option = click.option(
+    "--suite",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Test suite to run while recording. Its real ids are the point.",
+)
+_base_url_option = click.option(
+    "--base-url", required=True, help="API to record against."
+)
+_auth_option = click.option(
+    "--auth-token",
+    default="",
+    envvar="SPECGUARD_AUTH_TOKEN",
+    help="Credentials for the suite. Without it, protected endpoints return 401 "
+    "and record nothing, leaving them unguarded.",
+)
+_env_option = click.option(
+    "--env",
+    "extra_env",
+    multiple=True,
+    metavar="KEY=VALUE",
+    help="Extra environment for the suite. Repeatable.",
+)
+
+
+def _capture(
+    suite: Path,
+    spec: Path | None,
+    base_url: str,
+    auth_token: str = "",
+    extra_env: tuple[str, ...] = (),
+) -> dict:
+    """Run a suite with the recording plugin loaded and collect what it saw."""
+    routes = [ep.path for ep in parse_spec(spec)] if spec else []
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "captured.json"
+        env = {
+            **os.environ,
+            "SPECGUARD_BASE_URL": base_url,
+            "SPECGUARD_AUTH_TOKEN": auth_token,
+            "SPECGUARD_ROUTES": json.dumps(routes),
+            "SPECGUARD_CAPTURE": str(out),
+        }
+        for pair in extra_env:
+            key, _, value = pair.partition("=")
+            env[key] = value
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", str(suite), "-q", "-p", "specguard.record"],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        if not out.exists():
+            raise click.ClickException(
+                "the suite recorded nothing:\n" + (result.stdout or result.stderr)
+            )
+        captured = json.loads(out.read_text())
+
+    if not captured:
+        raise click.ClickException(
+            f"no HTTP calls captured from {suite} — does it use requests, and did "
+            "any test actually run?"
+        )
+    return captured
+
+
+@cli.command()
+@_spec_option
+@_suite_option
+@_base_url_option
+@_auth_option
+@_env_option
+@click.option("--out", default="baseline.json", type=click.Path(path_type=Path), show_default=True)
+@click.option("--force", is_flag=True, help="Overwrite an existing baseline.")
+def baseline(spec, suite, base_url, auth_token, extra_env, out, force) -> None:
+    """Record the API's current responses as the contract to guard against."""
+    if out.exists() and not force:
+        raise click.ClickException(
+            f"{out} already exists. Recording over the contract you are guarding "
+            "against should be deliberate — pass --force if that is what you want."
+        )
+
+    captured = _capture(suite, spec, base_url, auth_token, extra_env)
+    recorded = build_baseline(captured)
+    write_baseline(recorded, out)
+
+    click.echo(f"Recorded {len(recorded['endpoints'])} endpoints to {out}")
+
+    # An endpoint with no recorded schema is not guarded at all. Saying nothing
+    # would leave someone believing it was covered.
+    for key, entry in recorded["endpoints"].items():
+        if not entry["inferred_schema"]:
+            click.secho(
+                f"  not guarded: {key} returned no JSON body to record "
+                f"(statuses seen: {entry['success_status'] or 'none successful'})",
+                fg="yellow",
+            )
+        elif entry["low_confidence"]:
+            click.secho(
+                f"  low confidence: {key} rests on {entry['sample_size']} response(s); "
+                "fields seen once are recorded as required and may cause false drift",
+                fg="yellow",
+            )
+
+
+@cli.command()
+@_spec_option
+@_suite_option
+@_base_url_option
+@click.option("--baseline", "baseline_path", default="baseline.json",
+              type=click.Path(path_type=Path), show_default=True)
+@click.option("--report", default="drift_report.json", type=click.Path(path_type=Path),
+              show_default=True)
+@click.option("--junitxml", type=click.Path(path_type=Path), help="Also write JUnit XML.")
+@click.option("--fail-on", type=click.Choice([BREAKING, WARNING, INFO]), default=BREAKING,
+              show_default=True, help="Lowest severity that fails the build.")
+@_auth_option
+@_env_option
+def guard(spec, suite, base_url, baseline_path, report, junitxml, fail_on,
+          auth_token, extra_env) -> None:
+    """Compare live responses to the baseline and report drift."""
+    try:
+        recorded = load_baseline(baseline_path)
+    except FileNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    captured = _capture(suite, spec, base_url, auth_token, extra_env)
+
+    findings = []
+    for key, entry in sorted(recorded.get("endpoints", {}).items()):
+        observed = captured.get(key)
+        if observed is None:
+            click.secho(f"not exercised, so not checked: {key}", fg="yellow")
+            continue
+        if not entry.get("inferred_schema"):
+            click.secho(f"nothing recorded in the baseline, so not checked: {key}", fg="yellow")
+            continue
+        current = infer(observed.get("bodies") or [])["inferred_schema"]
+        findings += diff(entry["inferred_schema"], current, key)
+
+    write_report(findings, report)
+    if junitxml:
+        junit_report(findings, junitxml, fail_on=fail_on)
+
+    click.echo(console_report(findings))
+    click.echo(f"\nReport written to {report}")
+
+    if exceeds_threshold(findings, fail_on):
+        counts = summarise(findings)
+        click.secho(
+            f"\nFAIL: {counts[BREAKING]} breaking, {counts[WARNING]} warning "
+            f"(--fail-on {fail_on})",
+            fg="red",
+        )
+        raise SystemExit(1)
