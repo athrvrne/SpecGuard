@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Environments
+.venv/
+venv/
+env/
+
+# Test & tooling caches
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# SpecGuard run artifacts. `generated/` is deliberately ignored: generated
+# suites are reviewed and moved into the real suite by a human, never swept up
+# by an accidental `git add .`.
+generated/
+drift_report.json
+results.xml
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
