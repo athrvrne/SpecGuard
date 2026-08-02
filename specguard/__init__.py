@@ -1,2 +1,8 @@
 """SpecGuard — generate from spec, guard against drift. (early development)"""
-__version__ = "0.0.0"
+
+from .models import EndpointModel, Finding, TestCase
+from .spec_parser import parse_spec
+
+__version__ = "0.1.0.dev0"
+
+__all__ = ["EndpointModel", "Finding", "TestCase", "parse_spec", "__version__"]
