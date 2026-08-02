@@ -1,0 +1,51 @@
+"""Scaffolded once by SpecGuard — yours to edit; never regenerated over.
+
+This is plain pytest and requests. Nothing here imports SpecGuard, so the suite
+keeps working whether or not the tool stays installed.
+"""
+
+import os
+
+import pytest
+import requests
+
+BASE_URL = os.environ.get("SPECGUARD_BASE_URL", "{{ base_url }}")
+AUTH_TOKEN = os.environ.get("SPECGUARD_AUTH_TOKEN", "")
+
+
+class ApiClient:
+    """Thin wrapper so tests read as intent, not as HTTP plumbing."""
+
+    def __init__(self, base_url: str, token: str):
+        self.base_url = base_url.rstrip("/")
+        self.token = token
+        self.session = requests.Session()
+
+    def request(self, method: str, path: str, *, auth: bool = True, **kwargs):
+        headers = dict(kwargs.pop("headers", {}) or {})
+        if auth and self.token:
+            headers.setdefault("Authorization", f"Bearer {self.token}")
+        return self.session.request(
+            method,
+            f"{self.base_url}{path}",
+            headers=headers,
+            timeout=float(os.environ.get("SPECGUARD_TIMEOUT", "30")),
+            **kwargs,
+        )
+
+
+@pytest.fixture(scope="session")
+def api():
+    if not BASE_URL:
+        pytest.skip("set SPECGUARD_BASE_URL to run the generated suite")
+    client = ApiClient(BASE_URL, AUTH_TOKEN)
+    yield client
+    client.session.close()
+
+
+def pytest_configure(config):
+    for kind in ("happy", "validation", "boundary", "auth", "llm_extra"):
+        config.addinivalue_line("markers", f"{kind}: SpecGuard-generated {kind} case")
+    config.addinivalue_line(
+        "markers", "specguard_llm: proposed by a model — confirm before trusting"
+    )

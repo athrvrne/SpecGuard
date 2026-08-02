@@ -1,0 +1,9 @@
+"""Response schemas lifted from {{ spec_name }}, scaffolded once by SpecGuard.
+
+Edit freely — regenerating leaves this file alone once it exists.
+"""
+
+{% for name, schema in schemas %}
+{{ name }} = {{ schema | pyliteral }}
+
+{% endfor %}

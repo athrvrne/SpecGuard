@@ -1,0 +1,33 @@
+# Generated test suite — review before committing
+
+SpecGuard generated these tests from `{{ spec_name }}` on {{ generated_at }}.
+They are a **draft**, not a finished suite.
+
+## Before you trust any of this
+
+1. Read every test marked `# REVIEW:`. Those are cases where SpecGuard had to
+   invent data the spec didn't provide (usually a resource id), or where a model
+   proposed the case. They will fail against a real API until you fix them.
+2. Run the suite and see what fails:
+
+   ```bash
+   SPECGUARD_BASE_URL=https://api.staging.example.com pytest {{ out_dir }}
+   ```
+
+3. Move the cases you want to keep into your real suite. Anything left here is
+   overwritten the next time you run `specguard generate`.
+
+`conftest.py` and `schemas.py` are scaffolded **once** and never overwritten —
+they are yours to edit.
+
+## What was generated
+
+| Kind | Meaning |
+|---|---|
+| `happy` | The documented success path |
+| `validation` | A required field missing, or sent with the wrong type |
+| `boundary` | Declared min/max probed at the edge and one step past it |
+| `auth` | The same request with no credentials |
+| `llm_extra` | Proposed by a model from a field's prose description |
+
+Run one kind at a time with `pytest -m happy`.
