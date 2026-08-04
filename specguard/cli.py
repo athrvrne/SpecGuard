@@ -137,9 +137,13 @@ def _capture(
             text=True,
         )
         if not out.exists():
-            raise click.ClickException(
-                "the suite recorded nothing:\n" + (result.stdout or result.stderr)
-            )
+            output = result.stdout or result.stderr
+            if "No module named pytest" in output:
+                raise click.ClickException(
+                    f"{sys.executable} has no pytest, so the suite could not run. "
+                    "Install SpecGuard into the same environment as your tests."
+                )
+            raise click.ClickException("the suite recorded nothing:\n" + output)
         captured = json.loads(out.read_text())
 
     if not captured:
@@ -239,3 +243,49 @@ def guard(spec, suite, base_url, baseline_path, report, junitxml, fail_on,
             fg="red",
         )
         raise SystemExit(1)
+
+
+# --- the demo API -----------------------------------------------------------
+
+
+@cli.command()
+@click.option("--port", default=8080, show_default=True, help="Port to bind.")
+@click.option("--rename", metavar="OLD:NEW",
+              help="Rename a response field. This is the breaking case.")
+@click.option("--add", metavar="FIELD", help="Add a new optional field (info severity).")
+@click.option("--lax", is_flag=True, help="Stop rejecting invalid payloads.")
+def demo(port: int, rename: str | None, add: str | None, lax: bool) -> None:
+    """Run a small API that honours examples/petstore.yaml.
+
+    Something to point SpecGuard at with no network and no setup. Restart it
+    with --rename to stage a breaking change and watch `guard` catch it.
+    """
+    from .demo_api import DemoServer, apply_drift
+
+    try:
+        apply_drift(rename=rename, add=add, lax=lax)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc)) from exc
+
+    server = DemoServer(port=port)
+    url = server.start()
+    staged = []
+    if rename:
+        staged.append(f"rename {rename}")
+    if add:
+        staged.append(f"add {add}")
+    if lax:
+        staged.append("lax validation")
+
+    click.echo(f"Demo API on {url}")
+    if staged:
+        click.secho(f"Staged drift: {', '.join(staged)}", fg="yellow")
+    else:
+        click.echo("Serving the healthy contract.")
+    click.echo("Ctrl-C to stop.")
+    try:
+        server.thread.join()
+    except KeyboardInterrupt:
+        click.echo("\nStopping.")
+    finally:
+        server.stop()

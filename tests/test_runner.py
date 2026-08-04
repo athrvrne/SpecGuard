@@ -2,7 +2,7 @@ import json
 
 import requests
 
-from fake_petstore import FakePetstore
+from specguard.demo_api import DemoServer
 
 from specguard.runner import Recorder, endpoint_key
 
@@ -34,7 +34,7 @@ def test_a_multi_segment_route_is_matched_positionally():
 
 
 def test_recording_captures_responses_grouped_by_endpoint():
-    with FakePetstore() as base_url, Recorder(["/pets", "/pets/{petId}"]) as recorder:
+    with DemoServer() as base_url, Recorder(["/pets", "/pets/{petId}"]) as recorder:
         requests.get(f"{base_url}/pets?status=available")
         requests.get(f"{base_url}/pets/p_1", headers={"Authorization": "Bearer t"})
 
@@ -42,7 +42,7 @@ def test_recording_captures_responses_grouped_by_endpoint():
 
 
 def test_repeated_calls_accumulate_into_one_endpoint():
-    with FakePetstore() as base_url, Recorder(["/pets"]) as recorder:
+    with DemoServer() as base_url, Recorder(["/pets"]) as recorder:
         for _ in range(3):
             requests.get(f"{base_url}/pets?status=available")
 
@@ -50,14 +50,14 @@ def test_repeated_calls_accumulate_into_one_endpoint():
 
 
 def test_the_observed_status_is_recorded():
-    with FakePetstore() as base_url, Recorder(["/pets"]) as recorder:
+    with DemoServer() as base_url, Recorder(["/pets"]) as recorder:
         requests.get(f"{base_url}/pets?status=available")
 
     assert recorder.captured["GET /pets"]["statuses"] == [200]
 
 
 def test_error_responses_are_captured_but_kept_separate_from_success():
-    with FakePetstore() as base_url, Recorder(["/pets"]) as recorder:
+    with DemoServer() as base_url, Recorder(["/pets"]) as recorder:
         requests.get(f"{base_url}/pets?status=available")
         requests.get(f"{base_url}/pets?status=bogus")  # 422
 
@@ -68,14 +68,14 @@ def test_error_responses_are_captured_but_kept_separate_from_success():
 
 
 def test_non_json_responses_are_ignored():
-    with FakePetstore() as base_url, Recorder(["/pets/{petId}"]) as recorder:
+    with DemoServer() as base_url, Recorder(["/pets/{petId}"]) as recorder:
         requests.delete(f"{base_url}/pets/p_1", headers={"Authorization": "Bearer t"})
 
     assert recorder.captured["DELETE /pets/{petId}"]["bodies"] == []
 
 
 def test_recording_stops_when_the_recorder_exits():
-    with FakePetstore() as base_url:
+    with DemoServer() as base_url:
         with Recorder(["/pets"]) as recorder:
             requests.get(f"{base_url}/pets?status=available")
         requests.get(f"{base_url}/pets?status=available")
@@ -84,7 +84,7 @@ def test_recording_stops_when_the_recorder_exits():
 
 
 def test_responses_still_reach_the_caller_untouched():
-    with FakePetstore() as base_url, Recorder(["/pets"]):
+    with DemoServer() as base_url, Recorder(["/pets"]):
         response = requests.get(f"{base_url}/pets?status=available")
 
     assert response.status_code == 200
@@ -92,7 +92,7 @@ def test_responses_still_reach_the_caller_untouched():
 
 
 def test_captured_payload_is_json_serialisable():
-    with FakePetstore() as base_url, Recorder(["/pets"]) as recorder:
+    with DemoServer() as base_url, Recorder(["/pets"]) as recorder:
         requests.get(f"{base_url}/pets?status=available")
 
     json.dumps(recorder.captured)

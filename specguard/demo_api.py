@@ -1,7 +1,12 @@
-"""A minimal server that honours examples/petstore.yaml.
+"""A tiny API that honours ``examples/petstore.yaml``, with drift on demand.
 
-Used to prove a generated suite actually goes green against a conforming API —
-the only way to know the Generate half works end to end.
+Two jobs. It proves a generated suite genuinely goes green against a conforming
+API — the only way to know the Generate half works end to end. And it can be
+told to break its own contract, which is what makes the Guard demo runnable
+offline in four commands: generate, baseline, break, guard.
+
+Stdlib only, so it ships in the wheel and ``pip install specguard`` is enough.
+Not a mock server for your own spec — point Prism at that.
 """
 
 import json
@@ -13,9 +18,34 @@ PET = {"id": "p_1", "name": "Rex", "tag": "good-boy", "status": "available"}
 STATUSES = {"available", "pending", "sold"}
 _PET_PATH = re.compile(r"^/pets/[^/]+$")
 
-# Flipped by a test to simulate an API that has stopped validating its input.
-# Read at request time so it can be changed while the server is running.
+# Whether the API still validates its input. Read at request time so it can be
+# changed while the server is running.
 STRICT = True
+
+
+def apply_drift(rename: str | None = None, add: str | None = None, lax: bool = False) -> None:
+    """Break the API's contract in a specific, reproducible way.
+
+    ``rename`` takes ``OLD:NEW`` and is the breaking case — a required field
+    disappears. ``add`` introduces a new optional field, which is only ever
+    informational. ``lax`` stops the API rejecting invalid payloads, which no
+    schema diff can catch but the generated validation tests will.
+    """
+    global PET, STRICT
+
+    pet = dict(PET)
+    if rename:
+        old, sep, new = rename.partition(":")
+        if not sep or not old or not new:
+            raise ValueError(f"--rename expects OLD:NEW, got {rename!r}")
+        if old not in pet:
+            raise ValueError(f"{old!r} is not a field of the demo pet: {sorted(pet)}")
+        pet = {new if key == old else key: value for key, value in pet.items()}
+    if add:
+        pet[add] = "2026-01-01T00:00:00Z"
+
+    PET = pet
+    STRICT = not lax
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -112,17 +142,39 @@ class Handler(BaseHTTPRequestHandler):
         self._send(204)
 
 
-class FakePetstore:
-    """Context manager yielding the base URL of a running server."""
+class DemoServer:
+    """The demo API, on a background thread. Yields the base URL it bound to.
 
-    def __enter__(self):
-        self.server = HTTPServer(("127.0.0.1", 0), Handler)
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self.thread.start()
+    Port 0 asks the OS for a free port, so tests never collide.
+    """
+
+    def __init__(self, port: int = 0, host: str = "127.0.0.1"):
+        self.host = host
+        self.port = port
+        self.server = None
+        self.thread = None
+
+    @property
+    def url(self) -> str:
         host, port = self.server.server_address
         return f"http://{host}:{port}"
 
-    def __exit__(self, *exc):
+    def start(self) -> str:
+        self.server = HTTPServer((self.host, self.port), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        return self.url
+
+    def stop(self) -> None:
+        if self.server is None:
+            return
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=5)
+        self.server = None
+
+    def __enter__(self) -> str:
+        return self.start()
+
+    def __exit__(self, *exc) -> None:
+        self.stop()

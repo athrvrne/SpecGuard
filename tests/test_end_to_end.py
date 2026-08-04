@@ -10,8 +10,8 @@ import sys
 import pytest
 from click.testing import CliRunner
 
-import fake_petstore
-from fake_petstore import FakePetstore
+from specguard import demo_api
+from specguard.demo_api import DemoServer
 
 from specguard.cli import cli
 
@@ -39,7 +39,7 @@ def run_pytest(suite_dir, base_url, *extra):
 
 
 def test_generated_suite_passes_against_a_conforming_api(generated_suite):
-    with FakePetstore() as base_url:
+    with DemoServer() as base_url:
         result = run_pytest(generated_suite, base_url)
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -50,7 +50,7 @@ def test_generated_suite_passes_against_a_conforming_api(generated_suite):
 
 
 def test_the_suite_is_not_trivially_small(generated_suite):
-    with FakePetstore() as base_url:
+    with DemoServer() as base_url:
         result = run_pytest(generated_suite, base_url, "--collect-only")
 
     collected = [line for line in result.stdout.splitlines() if "::test_" in line]
@@ -62,9 +62,9 @@ def test_the_suite_catches_an_api_that_stops_validating(generated_suite, monkeyp
 
     Without this, a suite of tests that all pass proves nothing.
     """
-    monkeypatch.setattr(fake_petstore, "STRICT", False)
+    monkeypatch.setattr(demo_api, "STRICT", False)
 
-    with FakePetstore() as base_url:
+    with DemoServer() as base_url:
         result = run_pytest(generated_suite, base_url, "-m", "validation")
 
     assert result.returncode != 0, result.stdout

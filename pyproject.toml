@@ -26,13 +26,16 @@ dependencies = [
     "PyYAML>=6.0",
     "Jinja2>=3.1",
     "click>=8.1",
+    # Not dev-only: `baseline` and `guard` invoke pytest to drive the suite they
+    # record, and the generated suite is pytest over requests with jsonschema
+    # assertions. Without these, an installed SpecGuard cannot run its own output.
+    "pytest>=8.0",
     "requests>=2.31",
     "jsonschema>=4.20",
 ]
 
 [project.optional-dependencies]
 claude = ["anthropic>=0.40"]
-dev = ["pytest>=8.0"]
 
 [project.scripts]
 specguard = "specguard.cli:cli"

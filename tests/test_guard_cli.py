@@ -1,9 +1,9 @@
 import json
 
-import fake_petstore
+from specguard import demo_api
 import pytest
 from click.testing import CliRunner
-from fake_petstore import FakePetstore
+from specguard.demo_api import DemoServer
 
 from specguard.cli import cli
 
@@ -51,7 +51,7 @@ def run_guard(suite, petstore_path, base_url, baseline, report, *extra):
 
 def test_baseline_records_the_endpoints_the_suite_exercised(tmp_path, suite, petstore_path):
     out = tmp_path / "baseline.json"
-    with FakePetstore() as base_url:
+    with DemoServer() as base_url:
         result = record_baseline(suite, petstore_path, base_url, out)
 
     assert result.exit_code == 0, result.output
@@ -62,7 +62,7 @@ def test_baseline_records_the_endpoints_the_suite_exercised(tmp_path, suite, pet
 
 def test_baseline_folds_concrete_ids_onto_the_templated_route(tmp_path, suite, petstore_path):
     out = tmp_path / "baseline.json"
-    with FakePetstore() as base_url:
+    with DemoServer() as base_url:
         record_baseline(suite, petstore_path, base_url, out)
 
     # Not "GET /pets/string" — one entry per endpoint, not per resource id.
@@ -74,7 +74,7 @@ def test_baseline_folds_concrete_ids_onto_the_templated_route(tmp_path, suite, p
 
 def test_baseline_warns_when_the_sample_is_thin(tmp_path, suite, petstore_path):
     out = tmp_path / "baseline.json"
-    with FakePetstore() as base_url:
+    with DemoServer() as base_url:
         result = record_baseline(suite, petstore_path, base_url, out)
 
     assert "low confidence" in result.output.lower()
@@ -82,7 +82,7 @@ def test_baseline_warns_when_the_sample_is_thin(tmp_path, suite, petstore_path):
 
 def test_baseline_refuses_to_overwrite_without_force(tmp_path, suite, petstore_path):
     out = tmp_path / "baseline.json"
-    with FakePetstore() as base_url:
+    with DemoServer() as base_url:
         record_baseline(suite, petstore_path, base_url, out)
         result = record_baseline(suite, petstore_path, base_url, out)
 
@@ -95,7 +95,7 @@ def test_baseline_refuses_to_overwrite_without_force(tmp_path, suite, petstore_p
 
 def test_guard_finds_no_drift_against_an_unchanged_api(tmp_path, suite, petstore_path):
     baseline, report = tmp_path / "baseline.json", tmp_path / "drift.json"
-    with FakePetstore() as base_url:
+    with DemoServer() as base_url:
         record_baseline(suite, petstore_path, base_url, baseline)
         result = run_guard(suite, petstore_path, base_url, baseline, report)
 
@@ -109,13 +109,13 @@ def test_guard_reports_a_renamed_field_as_breaking_at_that_field(
     """The demo: baseline, rename a required field, guard."""
     baseline, report = tmp_path / "baseline.json", tmp_path / "drift.json"
 
-    with FakePetstore() as base_url:
+    with DemoServer() as base_url:
         record_baseline(suite, petstore_path, base_url, baseline)
 
     renamed = {"id": "p_1", "pet_name": "Rex", "tag": "good-boy", "status": "available"}
-    monkeypatch.setattr(fake_petstore, "PET", renamed)
+    monkeypatch.setattr(demo_api, "PET", renamed)
 
-    with FakePetstore() as base_url:
+    with DemoServer() as base_url:
         result = run_guard(suite, petstore_path, base_url, baseline, report)
 
     assert result.exit_code != 0
@@ -134,13 +134,13 @@ def test_guard_names_the_drifted_field_in_the_console(
     tmp_path, suite, petstore_path, monkeypatch
 ):
     baseline, report = tmp_path / "baseline.json", tmp_path / "drift.json"
-    with FakePetstore() as base_url:
+    with DemoServer() as base_url:
         record_baseline(suite, petstore_path, base_url, baseline)
 
     monkeypatch.setattr(
-        fake_petstore, "PET", {"id": "p_1", "pet_name": "Rex", "status": "available"}
+        demo_api, "PET", {"id": "p_1", "pet_name": "Rex", "status": "available"}
     )
-    with FakePetstore() as base_url:
+    with DemoServer() as base_url:
         result = run_guard(suite, petstore_path, base_url, baseline, report)
 
     assert "name" in result.output
@@ -151,13 +151,13 @@ def test_fail_on_warning_does_not_gate_on_an_added_field(
     tmp_path, suite, petstore_path, monkeypatch
 ):
     baseline, report = tmp_path / "baseline.json", tmp_path / "drift.json"
-    with FakePetstore() as base_url:
+    with DemoServer() as base_url:
         record_baseline(suite, petstore_path, base_url, baseline)
 
     added = {"id": "p_1", "name": "Rex", "tag": "t", "status": "available", "seen_at": "now"}
-    monkeypatch.setattr(fake_petstore, "PET", added)
+    monkeypatch.setattr(demo_api, "PET", added)
 
-    with FakePetstore() as base_url:
+    with DemoServer() as base_url:
         result = run_guard(
             suite, petstore_path, base_url, baseline, report, "--fail-on", "warning"
         )
@@ -169,7 +169,7 @@ def test_fail_on_warning_does_not_gate_on_an_added_field(
 def test_guard_can_emit_junit(tmp_path, suite, petstore_path):
     baseline, report = tmp_path / "baseline.json", tmp_path / "drift.json"
     junit = tmp_path / "drift.xml"
-    with FakePetstore() as base_url:
+    with DemoServer() as base_url:
         record_baseline(suite, petstore_path, base_url, baseline)
         run_guard(suite, petstore_path, base_url, baseline, report, "--junitxml", str(junit))
 
@@ -178,7 +178,7 @@ def test_guard_can_emit_junit(tmp_path, suite, petstore_path):
 
 
 def test_guard_without_a_baseline_fails_with_a_useful_message(tmp_path, suite, petstore_path):
-    with FakePetstore() as base_url:
+    with DemoServer() as base_url:
         result = run_guard(
             suite, petstore_path, base_url, tmp_path / "nope.json", tmp_path / "d.json"
         )
