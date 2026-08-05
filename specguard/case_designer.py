@@ -5,6 +5,10 @@ always produces the same cases for the same spec. An ``LLMProvider`` only ever
 *adds* to it.
 """
 
+import json
+import re
+
+from .llm.parsing import parse_cases
 from .models import EndpointModel, TestCase
 
 # Values used when the spec gives us nothing better to go on.
@@ -20,7 +24,82 @@ _BY_TYPE = {
 
 def design_cases(ep: EndpointModel, llm=None) -> list[TestCase]:
     """Every test case for one endpoint. ``llm`` adds to the floor, never replaces it."""
-    return _deterministic_matrix(ep)
+    cases = _deterministic_matrix(ep)
+    if llm is not None:
+        cases += _llm_extra_cases(ep, llm)
+    return cases
+
+
+# --- LLM extras -------------------------------------------------------------
+
+SYSTEM_PROMPT = """You are a senior test engineer. Given one API endpoint, propose \
+ADDITIONAL test cases that a JSON Schema cannot express but a careful engineer \
+would test, based on the natural-language field descriptions.
+
+Return ONLY a JSON array, no prose. Each element:
+{"name", "body", "expected_status", "reason"}
+
+- "reason" must quote or paraphrase the field description that justifies the case.
+  A human reads it to approve or delete the case, so a case without a real
+  justification is worse than no case at all.
+- Do NOT restate cases already covered by required/type/enum/min/max validation:
+  those are generated deterministically and your duplicates will be discarded.
+- If the descriptions imply nothing a schema cannot already enforce, return []."""
+
+
+def _llm_extra_cases(ep: EndpointModel, llm) -> list[TestCase]:
+    """Cases inferred from prose the schema cannot encode.
+
+    Every failure mode here — no provider, network error, refusal, malformed
+    JSON — returns an empty list. The deterministic floor is the contract; this
+    is an authoring aid layered on top of it and must never break generation.
+    """
+    if not ep.field_descriptions:
+        return []  # nothing to infer from; don't spend a call
+
+    try:
+        reply = llm.complete(SYSTEM_PROMPT, _llm_user_prompt(ep))
+    except Exception:
+        return []
+
+    path, _ = _concrete_path(ep)
+    cases = []
+    for index, proposed in enumerate(parse_cases(reply), start=1):
+        cases.append(
+            TestCase(
+                name=_llm_case_name(ep, proposed["name"], index),
+                kind="llm_extra",
+                method=ep.method,
+                path=path,
+                expected_status=proposed["expected_status"],
+                body=proposed["body"] if proposed["body"] is not None else _example_body(
+                    ep.request_schema
+                ),
+                query=_required_query(ep),
+                needs_review=True,
+                reason=proposed["reason"],
+            )
+        )
+    return cases
+
+
+def _llm_user_prompt(ep: EndpointModel) -> str:
+    notes = "\n".join(f"- {field}: {text}" for field, text in ep.field_descriptions.items())
+    return (
+        f"Endpoint: {ep.method} {ep.path}\n"
+        f"Description: {ep.description or '(none)'}\n"
+        f"Success status: {ep.success_status}\n"
+        f"Documented error statuses: {ep.declared_statuses}\n"
+        f"Request schema: {json.dumps(ep.request_schema)}\n"
+        f"Field notes the schema cannot enforce:\n{notes}\n\n"
+        "Return the JSON array of extra cases."
+    )
+
+
+def _llm_case_name(ep: EndpointModel, proposed: str, index: int) -> str:
+    """Namespaced so a model-chosen name can never shadow a deterministic one."""
+    slug = re.sub(r"[^a-z0-9]+", "_", str(proposed).lower()).strip("_")
+    return f"test_{_slug(ep)}_llm_{index}_{slug or 'case'}"
 
 
 def _deterministic_matrix(ep: EndpointModel) -> list[TestCase]:

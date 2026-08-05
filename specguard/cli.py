@@ -18,6 +18,7 @@ from . import __version__
 from .baseline_store import build_baseline, load_baseline, write_baseline
 from .case_designer import design_cases
 from .drift_engine import BREAKING, INFO, WARNING, diff
+from .llm import get_provider
 from .reporter import console_report, exceeds_threshold, junit_report, summarise, write_report
 from .schema_inferer import infer
 from .spec_parser import parse_spec
@@ -44,21 +45,38 @@ def cli() -> None:
     default="",
     help="Baked into the scaffolded conftest as the default base URL.",
 )
-def generate(spec: Path, out: Path, base_url: str) -> None:
+@click.option(
+    "--provider",
+    default="none",
+    show_default=True,
+    help="Model used to propose EXTRA cases: claude, ollama, or none. The "
+    "deterministic matrix is produced either way.",
+)
+@click.option("--model", default=None, help="Override the provider's default model.")
+def generate(spec: Path, out: Path, base_url: str, provider: str, model: str | None) -> None:
     """Turn an OpenAPI spec into a review-ready pytest suite."""
     endpoints = parse_spec(spec)
     if not endpoints:
         raise click.ClickException(f"no operations found in {spec}")
 
-    written = render_suite(endpoints, out, spec_name=spec.name, base_url=base_url)
+    # Resolve the provider before writing anything, so a typo fails fast
+    # instead of leaving a half-generated directory behind.
+    try:
+        llm = get_provider(provider, model)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint="--provider") from exc
 
-    cases = [case for ep in endpoints for case in design_cases(ep)]
+    suite = render_suite(endpoints, out, llm=llm, spec_name=spec.name, base_url=base_url)
+    cases = suite.cases
     needs_review = [c for c in cases if c.needs_review]
+    proposed = [c for c in cases if c.kind == "llm_extra"]
 
     click.echo(f"Parsed {len(endpoints)} endpoints from {spec}")
     click.echo(f"Wrote {len(cases)} cases to {out}/")
-    for path in written:
+    for path in suite.files:
         click.echo(f"  {path.name}")
+    if llm is not None:
+        click.echo(f"{provider} proposed {len(proposed)} extra case(s)")
 
     click.echo("")
     if needs_review:

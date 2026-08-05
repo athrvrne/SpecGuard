@@ -8,6 +8,7 @@ SpecGuard, so a generated suite outlives the tool that wrote it.
 from datetime import datetime, timezone
 from pathlib import Path
 from pprint import pformat
+from typing import NamedTuple
 
 from jinja2 import Environment, PackageLoader, StrictUndefined
 
@@ -55,6 +56,13 @@ def render_module(
     return template.render(groups=groups, schema_names=schema_names, spec_name=spec_name)
 
 
+class RenderedSuite(NamedTuple):
+    """What a generation run produced."""
+
+    files: list[Path]
+    cases: list[TestCase]
+
+
 def render_suite(
     endpoints: list[EndpointModel],
     out_dir: str | Path,
@@ -62,18 +70,26 @@ def render_suite(
     llm=None,
     spec_name: str = "the spec",
     base_url: str = "",
-) -> list[Path]:
-    """Write a full suite to ``out_dir``. Returns the paths written."""
+) -> "RenderedSuite":
+    """Write a full suite to ``out_dir``.
+
+    Returns both the files written and the cases they came from, so a caller
+    that wants to report on the cases doesn't have to design them a second
+    time — which, with a provider configured, would mean paying for every
+    model call twice.
+    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     env = _environment()
 
     schemas: dict[str, dict] = {}
     grouped: dict[str, list[tuple[EndpointModel, list[TestCase]]]] = {}
+    designed: list[TestCase] = []
     for ep in endpoints:
         cases = design_cases(ep, llm=llm)
         _attach_schema_assertions(ep, cases, schemas)
         grouped.setdefault(module_name_for(ep), []).append((ep, cases))
+        designed += cases
 
     written = []
     for module, groups in sorted(grouped.items()):
@@ -82,7 +98,7 @@ def render_suite(
         written.append(path)
 
     written += _scaffold(env, out_dir, schemas, spec_name, base_url)
-    return written
+    return RenderedSuite(files=written, cases=designed)
 
 
 def _attach_schema_assertions(
