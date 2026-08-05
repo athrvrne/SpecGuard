@@ -10,7 +10,7 @@ from pathlib import Path
 from pprint import pformat
 from typing import NamedTuple
 
-from jinja2 import Environment, PackageLoader, StrictUndefined
+from jinja2 import ChoiceLoader, Environment, FileSystemLoader, PackageLoader, StrictUndefined
 
 from .case_designer import design_cases
 from .models import EndpointModel, TestCase
@@ -20,9 +20,23 @@ from .models import EndpointModel, TestCase
 SCAFFOLD_ONCE = ("conftest.py", "schemas.py", "README.md")
 
 
-def _environment() -> Environment:
+def _environment(template_dir: str | Path | None = None) -> Environment:
+    """Jinja environment, optionally preferring a user's own templates.
+
+    A team with existing conventions — httpx instead of requests, async tests,
+    their own client wrapper — overrides only the templates it cares about.
+    ``ChoiceLoader`` falls through to the packaged ones for the rest, so an
+    override never has to be a full copy that then rots.
+    """
+    loader = PackageLoader("specguard", "templates")
+    if template_dir is not None:
+        template_dir = Path(template_dir)
+        if not template_dir.is_dir():
+            raise FileNotFoundError(f"no template directory at {template_dir}")
+        loader = ChoiceLoader([FileSystemLoader(str(template_dir)), loader])
+
     env = Environment(
-        loader=PackageLoader("specguard", "templates"),
+        loader=loader,
         undefined=StrictUndefined,
         trim_blocks=True,
         lstrip_blocks=True,
@@ -40,7 +54,9 @@ def module_name_for(ep: EndpointModel) -> str:
 
 
 def render_module(
-    groups: list[tuple[EndpointModel, list[TestCase]]], spec_name: str = "the spec"
+    groups: list[tuple[EndpointModel, list[TestCase]]],
+    spec_name: str = "the spec",
+    template_dir: str | Path | None = None,
 ) -> str:
     """Render one pytest module for a group of endpoints."""
     schema_names = sorted(
@@ -52,7 +68,7 @@ def render_module(
             if assertion.get("kind") == "json_schema"
         }
     )
-    template = _environment().get_template("test_module.py.j2")
+    template = _environment(template_dir).get_template("test_module.py.j2")
     return template.render(groups=groups, schema_names=schema_names, spec_name=spec_name)
 
 
@@ -70,6 +86,7 @@ def render_suite(
     llm=None,
     spec_name: str = "the spec",
     base_url: str = "",
+    template_dir: str | Path | None = None,
 ) -> "RenderedSuite":
     """Write a full suite to ``out_dir``.
 
@@ -80,7 +97,7 @@ def render_suite(
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    env = _environment()
+    env = _environment(template_dir)
 
     schemas: dict[str, dict] = {}
     grouped: dict[str, list[tuple[EndpointModel, list[TestCase]]]] = {}
@@ -94,7 +111,9 @@ def render_suite(
     written = []
     for module, groups in sorted(grouped.items()):
         path = out_dir / module
-        path.write_text(render_module(groups, spec_name=spec_name))
+        path.write_text(
+            render_module(groups, spec_name=spec_name, template_dir=template_dir)
+        )
         written.append(path)
 
     written += _scaffold(env, out_dir, schemas, spec_name, base_url)

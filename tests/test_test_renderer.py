@@ -119,3 +119,35 @@ def test_generated_suite_does_not_import_specguard(tmp_path, endpoints):
                 imported.add(node.module.split(".")[0])
 
     assert imported == {"os", "pytest", "requests", "jsonschema", "schemas"}
+
+
+# --- template overrides -----------------------------------------------------
+
+
+def test_a_user_template_replaces_the_built_in_one(tmp_path, by_id):
+    templates = tmp_path / "templates"
+    templates.mkdir()
+    (templates / "test_module.py.j2").write_text("# my house style\n")
+
+    source = render_module(
+        [(by_id["listPets"], design_cases(by_id["listPets"]))], template_dir=templates
+    )
+
+    assert source.strip() == "# my house style"
+
+
+def test_templates_not_overridden_fall_back_to_the_built_ins(tmp_path, endpoints):
+    templates = tmp_path / "templates"
+    templates.mkdir()
+    (templates / "test_module.py.j2").write_text("# my house style\n")
+    out = tmp_path / "generated"
+
+    render_suite(endpoints, out, template_dir=templates)
+
+    assert (out / "test_pets.py").read_text().strip() == "# my house style"
+    assert "def api(" in (out / "conftest.py").read_text()  # still the built-in
+
+
+def test_a_missing_template_dir_is_rejected_clearly(tmp_path, by_id):
+    with pytest.raises(FileNotFoundError, match="template"):
+        render_module([(by_id["listPets"], [])], template_dir=tmp_path / "nope")

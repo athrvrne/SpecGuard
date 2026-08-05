@@ -96,3 +96,13 @@ def test_demo_help_explains_how_to_stage_drift():
 def test_the_demo_module_is_importable_without_the_test_suite():
     # It ships in the wheel, so `pip install specguard` is enough to run it.
     assert demo_api.__name__ == "specguard.demo_api"
+
+
+def test_a_port_already_in_use_reports_clearly_instead_of_a_traceback():
+    with DemoServer() as url:
+        port = int(url.rsplit(":", 1)[1])
+        result = CliRunner().invoke(cli, ["demo", "--port", str(port)])
+
+    assert result.exit_code != 0
+    assert "already in use" in result.output
+    assert "Traceback" not in result.output

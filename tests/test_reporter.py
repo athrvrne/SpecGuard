@@ -4,6 +4,7 @@ import xml.etree.ElementTree as ET
 from specguard.drift_engine import BREAKING, INFO, WARNING
 from specguard.models import Finding
 from specguard.reporter import (
+    _ordered,
     console_report,
     exceeds_threshold,
     junit_report,
@@ -34,6 +35,35 @@ def test_summary_counts_each_severity():
 
 def test_summary_reports_zeroes_rather_than_omitting_a_severity():
     assert summarise([]) == {"breaking": 0, "warning": 0, "info": 0}
+
+
+# --- ordering ---------------------------------------------------------------
+#
+# The engine sorts within one endpoint, but a run concatenates many endpoints,
+# so the breaking findings end up scattered through the output. Every report
+# orders them globally instead: the thing that fails the build reads first.
+
+
+def test_console_report_puts_every_breaking_finding_first():
+    scattered = [finding(INFO), finding(BREAKING), finding(WARNING), finding(BREAKING)]
+    lines = [ln for ln in console_report(scattered).splitlines() if "] " in ln]
+
+    severities = [ln.split("]")[1].split()[0] for ln in lines]
+    assert severities == [BREAKING, BREAKING, WARNING, INFO]
+
+
+def test_the_json_report_uses_the_same_order_as_the_console(tmp_path):
+    scattered = [finding(INFO), finding(BREAKING), finding(WARNING)]
+    path = tmp_path / "drift.json"
+    write_report(scattered, path)
+
+    written = [f["severity"] for f in json.loads(path.read_text())["findings"]]
+    assert written == [BREAKING, WARNING, INFO]
+
+
+def test_ordering_is_stable_for_findings_of_equal_severity():
+    same = [finding(BREAKING, field="b"), finding(BREAKING, field="a")]
+    assert [f.field for f in _ordered(same)] == ["b", "a"]
 
 
 # --- json report ------------------------------------------------------------

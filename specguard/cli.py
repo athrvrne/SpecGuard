@@ -53,7 +53,13 @@ def cli() -> None:
     "deterministic matrix is produced either way.",
 )
 @click.option("--model", default=None, help="Override the provider's default model.")
-def generate(spec: Path, out: Path, base_url: str, provider: str, model: str | None) -> None:
+@click.option(
+    "--template-dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Your own Jinja templates. Override only the ones you care about; the "
+    "rest fall back to the built-ins.",
+)
+def generate(spec, out, base_url, provider, model, template_dir) -> None:
     """Turn an OpenAPI spec into a review-ready pytest suite."""
     endpoints = parse_spec(spec)
     if not endpoints:
@@ -66,7 +72,14 @@ def generate(spec: Path, out: Path, base_url: str, provider: str, model: str | N
     except ValueError as exc:
         raise click.BadParameter(str(exc), param_hint="--provider") from exc
 
-    suite = render_suite(endpoints, out, llm=llm, spec_name=spec.name, base_url=base_url)
+    suite = render_suite(
+        endpoints,
+        out,
+        llm=llm,
+        spec_name=spec.name,
+        base_url=base_url,
+        template_dir=template_dir,
+    )
     cases = suite.cases
     needs_review = [c for c in cases if c.needs_review]
     proposed = [c for c in cases if c.kind == "llm_extra"]
@@ -127,6 +140,22 @@ _env_option = click.option(
 )
 
 
+def _suite_env(
+    base_url: str, auth_token: str, extra_env: tuple[str, ...] = (), **overrides: str
+) -> dict:
+    """The environment a generated suite expects, plus anything the user added."""
+    env = {
+        **os.environ,
+        "SPECGUARD_BASE_URL": base_url,
+        "SPECGUARD_AUTH_TOKEN": auth_token,
+        **overrides,
+    }
+    for pair in extra_env:
+        key, _, value = pair.partition("=")
+        env[key] = value
+    return env
+
+
 def _capture(
     suite: Path,
     spec: Path | None,
@@ -138,16 +167,13 @@ def _capture(
     routes = [ep.path for ep in parse_spec(spec)] if spec else []
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "captured.json"
-        env = {
-            **os.environ,
-            "SPECGUARD_BASE_URL": base_url,
-            "SPECGUARD_AUTH_TOKEN": auth_token,
-            "SPECGUARD_ROUTES": json.dumps(routes),
-            "SPECGUARD_CAPTURE": str(out),
-        }
-        for pair in extra_env:
-            key, _, value = pair.partition("=")
-            env[key] = value
+        env = _suite_env(
+            base_url,
+            auth_token,
+            extra_env,
+            SPECGUARD_ROUTES=json.dumps(routes),
+            SPECGUARD_CAPTURE=str(out),
+        )
         result = subprocess.run(
             [sys.executable, "-m", "pytest", str(suite), "-q", "-p", "specguard.record"],
             env=env,
@@ -286,7 +312,13 @@ def demo(port: int, rename: str | None, add: str | None, lax: bool) -> None:
         raise click.BadParameter(str(exc)) from exc
 
     server = DemoServer(port=port)
-    url = server.start()
+    try:
+        url = server.start()
+    except OSError as exc:
+        raise click.ClickException(
+            f"could not bind port {port}: {exc.strerror or exc}. "
+            "Something is already using it — stop that, or pass a different --port."
+        ) from exc
     staged = []
     if rename:
         staged.append(f"rename {rename}")
@@ -307,3 +339,29 @@ def demo(port: int, rename: str | None, add: str | None, lax: bool) -> None:
         click.echo("\nStopping.")
     finally:
         server.stop()
+
+
+# --- running a suite --------------------------------------------------------
+
+
+@cli.command(context_settings={"ignore_unknown_options": True})
+@click.argument("suite", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@_base_url_option
+@_auth_option
+@_env_option
+@click.option("--junitxml", type=click.Path(path_type=Path), help="Write JUnit XML here.")
+@click.argument("pytest_args", nargs=-1, type=click.UNPROCESSED)
+def run(suite, base_url, auth_token, extra_env, junitxml, pytest_args) -> None:
+    """Run a generated suite with SpecGuard's environment wired up.
+
+    This is `pytest` with the base URL and credentials placed where the
+    scaffolded conftest looks for them — the same wiring `baseline` and `guard`
+    use, so a suite that passes here behaves identically when recorded. Any
+    unrecognised arguments are handed straight to pytest.
+    """
+    command = [sys.executable, "-m", "pytest", str(suite), *pytest_args]
+    if junitxml:
+        command += [f"--junitxml={junitxml}"]
+
+    result = subprocess.run(command, env=_suite_env(base_url, auth_token, extra_env))
+    raise SystemExit(result.returncode)

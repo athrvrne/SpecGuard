@@ -20,6 +20,17 @@ _RANK = {severity: index for index, severity in enumerate(SEVERITIES)}
 _ICON = {BREAKING: "x", WARNING: "!", INFO: "i"}
 
 
+def _ordered(findings: list[Finding]) -> list[Finding]:
+    """Most severe first, globally.
+
+    The drift engine sorts within one endpoint, but a run concatenates many, so
+    without this the breaking findings are scattered through the output and the
+    reader has to hunt for the thing that failed the build. ``sorted`` is
+    stable, so findings of equal severity keep their per-endpoint order.
+    """
+    return sorted(findings, key=lambda f: _RANK[f.severity])
+
+
 def summarise(findings: list[Finding]) -> dict[str, int]:
     """Counts per severity, always reporting every severity."""
     counts = dict.fromkeys(SEVERITIES, 0)
@@ -40,7 +51,7 @@ def write_report(findings: list[Finding], path: str | Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "findings": [asdict(f) for f in findings],
+        "findings": [asdict(f) for f in _ordered(findings)],
         "summary": summarise(findings),
     }
     path.write_text(json.dumps(payload, indent=2) + "\n")
@@ -57,7 +68,7 @@ def console_report(findings: list[Finding]) -> str:
         f"{counts[BREAKING]} breaking, {counts[WARNING]} warning, {counts[INFO]} info",
         "",
     ]
-    for finding in findings:
+    for finding in _ordered(findings):
         field = finding.field or "(response root)"
         lines.append(f"  [{_ICON[finding.severity]}] {finding.severity:8} {finding.endpoint}")
         lines.append(f"      {field}: {finding.detail}")
@@ -83,7 +94,7 @@ def junit_report(findings: list[Finding], path: str | Path, fail_on: str = BREAK
         errors="0",
         skipped="0",
     )
-    for finding in findings:
+    for finding in _ordered(findings):
         case = ET.SubElement(
             suite,
             "testcase",

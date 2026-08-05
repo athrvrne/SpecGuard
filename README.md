@@ -1,5 +1,7 @@
 # SpecGuard
 
+[![CI](https://github.com/athrvrne/specguard/actions/workflows/ci.yml/badge.svg)](https://github.com/athrvrne/specguard/actions/workflows/ci.yml)
+
 **Generate from spec, guard against drift.**
 
 Point SpecGuard at an OpenAPI spec and it writes you a review-ready pytest
@@ -201,10 +203,10 @@ nothing recorded in the baseline, so not checked: DELETE /pets/{petId}
 
   [x] breaking GET /pets
       [].name: was required in baseline, absent in current response
-  [i] info     GET /pets
-      [].pet_name: new optional field; consider adding it to the baseline
   [x] breaking GET /pets/{petId}
       name: was required in baseline, absent in current response
+  [i] info     GET /pets
+      [].pet_name: new optional field; consider adding it to the baseline
   [i] info     GET /pets/{petId}
       pet_name: new optional field; consider adding it to the baseline
   [i] info     POST /pets
@@ -336,6 +338,11 @@ generated/
 Only test modules are overwritten. Edit `conftest.py` and regenerate freely:
 SpecGuard will not touch it again.
 
+If your team has its own conventions — httpx instead of requests, async tests,
+an in-house client wrapper — point `--template-dir` at your own Jinja templates.
+Override only the ones you care about; the rest fall back to the built-ins, so
+an override never has to be a full copy that then rots.
+
 ---
 
 ## Data models
@@ -442,9 +449,18 @@ specguard guard --spec openapi.yaml --suite generated/ \
                 --baseline baseline.json --report drift.json \
                 --junitxml drift.xml --fail-on breaking
 
+# run a suite with the base URL and credentials already wired up
+specguard run generated/ --base-url https://api.staging.example.com \
+                         --auth-token $TOKEN --junitxml results.xml -- -m boundary
+
 # a breakable API to try all of the above against
 specguard demo --port 8080 [--rename name:pet_name | --add seen_at | --lax]
 ```
+
+`run` is deliberately thin: it is `pytest` with the environment the scaffolded
+`conftest.py` looks for, so a suite that passes under `run` behaves identically
+when `baseline` and `guard` drive it. Anything it doesn't recognise is handed
+straight through to pytest.
 
 `baseline` and `guard` both take `--suite`, because they drive *your* tests to
 produce the traffic they record. `--auth-token` matters more than it looks:
@@ -483,7 +499,8 @@ picture, but only those at or above `--fail-on` are marked as failures.
       plus optional model-proposed extras
 - [x] **M3** — Guard half: `baseline` + drift detection with fixed severities,
       JUnit output, and a bundled demo API
-- [ ] **M4** — `--template-dir`, README polish, CI recipes, published to PyPI
+- [x] **M4** — `run` command, `--template-dir`, CI on Python 3.10–3.13
+- [ ] **M5** — published to PyPI
 
 Known gaps, stated plainly:
 
@@ -491,8 +508,6 @@ Known gaps, stated plainly:
   that happened to appear in all 3 is recorded as required — but one seen twice
   is not, so losing it later registers as `info` rather than `breaking`. The
   `low confidence` warning fires correctly; the severity is still generous.
-- **No `--template-dir`.** The generated house style (pytest over `requests`) is
-  fixed unless you fork.
 - **Local `$ref`s only.** Remote (`http://`) refs and non-JSON media types are
   skipped rather than raising.
 
@@ -508,8 +523,8 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 .venv/bin/pytest
 ```
 
-Requires Python 3.10+. **209 tests, none of which call a live model or reach the
-network.**
+Requires Python 3.10+, tested on 3.10 through 3.13 plus macOS in CI. **223
+tests, none of which call a live model or reach the network.**
 
 The suite includes two **end-to-end acceptance tests**, both built on the same
 idea — a test that only ever passes proves nothing:

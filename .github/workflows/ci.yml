@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest · py${{ matrix.python-version }} · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # pyproject declares requires-python = ">=3.10". This is what makes that
+        # claim true rather than aspirational: the floor is tested on every run.
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        os: [ubuntu-latest]
+        include:
+          # SpecGuard binds sockets and spawns subprocesses; both behave
+          # differently enough on macOS to be worth one job.
+          - python-version: "3.13"
+            os: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Test
+        run: pytest -q
+
+  demo:
+    name: end-to-end demo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      # Installs the built wheel rather than the working tree, because the two
+      # differ in exactly the way that matters: a missing package-data entry or
+      # a dependency in the wrong extra only shows up here.
+      - name: Build and install the wheel
+        run: |
+          pip install build
+          python -m build --wheel
+          pip install dist/*.whl
+
+      - name: Generate a suite
+        run: specguard generate examples/petstore.yaml --out generated/
+
+      - name: Baseline against the healthy demo API
+        run: |
+          specguard demo --port 8080 &
+          for _ in $(seq 60); do
+            curl -sf "http://127.0.0.1:8080/pets?status=available" >/dev/null && break
+            sleep 0.5
+          done
+          specguard baseline --spec examples/petstore.yaml --suite generated/ \
+                             --base-url http://127.0.0.1:8080 --auth-token t --force
+          kill %1 || true
+
+      - name: Guard against a renamed field, and expect it to fail
+        run: |
+          specguard demo --port 8080 --rename name:pet_name &
+          for _ in $(seq 60); do
+            curl -sf "http://127.0.0.1:8080/pets?status=available" >/dev/null && break
+            sleep 0.5
+          done
+          if specguard guard --spec examples/petstore.yaml --suite generated/ \
+                             --base-url http://127.0.0.1:8080 --auth-token t \
+                             --report drift.json --junitxml drift.xml; then
+            echo "::error::guard exited 0 on a renamed required field"
+            exit 1
+          fi
+          kill %1 || true
+          python -c "import json; f=json.load(open('drift.json'))['findings']; b={x['field'] for x in f if x['severity']=='breaking'}; assert b=={'name','[].name'}, b; print('guard reported breaking drift at', sorted(b))"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: drift-report
+          path: |
+            drift.json
+            drift.xml
