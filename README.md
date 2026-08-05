@@ -6,8 +6,9 @@ Point SpecGuard at an OpenAPI spec and it writes you a review-ready pytest
 suite. Point it at a running API and it records what the responses actually look
 like, then tells you when that quietly changes.
 
-> ⚠️ **Status: in development.** The Generate half works end to end (see
-> [Roadmap](#roadmap)). The Guard half is not built yet. Not on PyPI.
+> ⚠️ **Status: in development.** Both halves work end to end — `generate`,
+> `baseline`, `guard`, and a bundled `demo` API to try them against. Polish and
+> packaging remain (see [Roadmap](#roadmap)). Not on PyPI yet.
 
 ---
 
@@ -46,7 +47,7 @@ flowchart TB
 
     subgraph D["GUARD  ·  every CI run, no LLM"]
         direction LR
-        API[live API] --> RUN[runner]
+        API[live API] --> RUN[runner<br/><i>records via pytest plugin</i>]
         RUN -->|responses| INF[schema_inferer]
         INF -->|baseline.json| DE[drift_engine]
         RUN --> DE
@@ -55,11 +56,19 @@ flowchart TB
         CONF --> Gate[gating assertion]
     end
 
-    Suite -.-> RUN
+    Suite -.->|the suite IS the recorder| RUN
 ```
 
 **Generate** is a one-time authoring step. **Guard** runs on every build and
 never calls a model.
+
+That dotted line is the load-bearing part. Baselining needs *real* request
+data — a real order id, a real auth token — and a spec supplies neither.
+SpecGuard doesn't invent them: it records while your existing suite runs, because
+that suite has real ids in it already. A human made it pass. Recording hooks
+`requests.Session.send` from a plugin loaded with `-p specguard.record`, so it
+works on hand-written suites too, and generated tests still import nothing from
+SpecGuard.
 
 ---
 
@@ -73,9 +82,12 @@ no tool at all. So:
 - **The deterministic core does everything that gates or asserts.** Spec parsing,
   case design, schema inference, the diff engine, severity classification, and
   the renderer are all reproducible and unit-tested with no model in the loop.
-- **The LLM has exactly two jobs**, both additive: propose *extra* test cases
-  inferred from natural-language field descriptions a JSON Schema can't encode
-  ("must be a future date"), and optionally explain a drift finding in prose.
+- **The LLM has exactly one job today**, and it is additive: propose *extra* test
+  cases inferred from natural-language field descriptions a JSON Schema can't
+  encode ("must not be blank", "must be a future date"). Every failure mode —
+  no provider, connection refused, HTTP 500, a refusal in prose, truncated
+  JSON — returns zero extra cases rather than raising. (Prose explanations of a
+  drift finding are designed but not built.)
 - **Generated tests are a draft.** They land in `generated/`, flagged for review,
   never auto-committed. Anything SpecGuard had to guess is marked `# REVIEW:`
   with the reason.
@@ -90,14 +102,19 @@ How little is non-deterministic, concretely:
 | `models` | `EndpointModel`, `TestCase`, `Finding` | ✅ |
 | `case_designer` | `EndpointModel` → `TestCase` list | ✅ core, LLM adds extras |
 | `test_renderer` | `TestCase` list → pytest source | ✅ |
+| `runner` | Record real responses while a suite runs | ✅ |
+| `record` | The pytest plugin that does the recording | ✅ |
+| `schema_inferer` | Responses → inferred schema + value stats | ✅ |
+| `baseline_store` | Read/write `baseline.json` | ✅ |
+| `drift_engine` | `diff(baseline, current)` → findings | ✅ |
+| `reporter` | Findings → JSON / console / JUnit | ✅ |
+| `demo_api` | A breakable API to try it against | ✅ |
 | `cli` | Command surface, wiring | ✅ |
-| `llm/` | Provider protocol + Claude/Ollama impls | ❌ *isolated* |
-| `runner` | Execute requests, capture responses | ✅ *(planned)* |
-| `schema_inferer` | Responses → schema + value stats | ✅ *(planned)* |
-| `drift_engine` | `diff(baseline, current)` → findings | ✅ *(planned)* |
-| `reporter` | Findings → JSON / console / JUnit | ✅ *(planned)* |
+| `llm/parsing` | Model reply → validated cases | ✅ |
+| `llm/claude`, `llm/ollama` | The only calls that leave the machine | ❌ *isolated* |
 
-One module is non-deterministic, and nothing depends on it.
+Two files are non-deterministic, both behind one `complete()` method, and
+**nothing in the Guard half imports them.**
 
 ---
 
@@ -138,6 +155,73 @@ SPECGUARD_BASE_URL=https://api.staging.example.com \
 SPECGUARD_AUTH_TOKEN=$TOKEN \
 .venv/bin/pytest generated/
 ```
+
+---
+
+## The demo: catch a renamed field
+
+No network, no Node, nothing to sign up for. SpecGuard ships a small API that
+honours the bundled spec — and can be told to break its own contract.
+
+In one terminal:
+
+```bash
+.venv/bin/specguard demo --port 8080
+```
+
+In another, record what the API returns today:
+
+```bash
+.venv/bin/specguard baseline --spec examples/petstore.yaml --suite generated/ \
+                             --base-url http://127.0.0.1:8080 --auth-token t
+```
+
+```
+Recorded 4 endpoints to baseline.json
+  not guarded: DELETE /pets/{petId} returned no JSON body to record (statuses seen: 204)
+  low confidence: GET /pets rests on 3 response(s); fields seen once are recorded as required and may cause false drift
+  low confidence: GET /pets/{petId} rests on 1 response(s); ...
+  low confidence: POST /pets rests on 3 response(s); ...
+```
+
+Now restart the demo as if someone shipped a rename, and guard:
+
+```bash
+.venv/bin/specguard demo --port 8080 --rename name:pet_name
+```
+
+```bash
+.venv/bin/specguard guard --spec examples/petstore.yaml --suite generated/ \
+                          --base-url http://127.0.0.1:8080 --auth-token t
+```
+
+```
+nothing recorded in the baseline, so not checked: DELETE /pets/{petId}
+2 breaking, 0 warning, 3 info
+
+  [x] breaking GET /pets
+      [].name: was required in baseline, absent in current response
+  [i] info     GET /pets
+      [].pet_name: new optional field; consider adding it to the baseline
+  [x] breaking GET /pets/{petId}
+      name: was required in baseline, absent in current response
+  [i] info     GET /pets/{petId}
+      pet_name: new optional field; consider adding it to the baseline
+  [i] info     POST /pets
+      pet_name: new optional field; consider adding it to the baseline
+
+Report written to drift_report.json
+
+FAIL: 2 breaking, 0 warning (--fail-on breaking)
+```
+
+Exit code 1, the exact field named, nested paths addressed (`[].name` is the
+field inside the array items). `--rename` is the breaking case; `--add` gives you
+an informational one, and `--lax` makes the API stop validating input — drift no
+schema diff can catch, but the generated validation tests do.
+
+To point it at *your* spec instead, [Prism](https://github.com/stoplightio/prism)
+(`npx @stoplight/prism-cli mock your-spec.yaml`) serves any OpenAPI file.
 
 ---
 
@@ -190,6 +274,54 @@ Run one kind at a time: `pytest -m boundary`.
 
 Expected status codes come from the spec, not from assumptions — an API that
 documents `400` for validation errors gets `400`, not a hardcoded `422`.
+
+### The optional model
+
+The first four rows above need no model at all. `--provider` adds the fifth:
+
+```bash
+specguard generate openapi.yaml --provider claude   # or ollama, or none (default)
+```
+
+The model reads only the prose notes on request-body fields — the things a
+schema cannot express — and proposes cases for them:
+
+```python
+# REVIEW: description says the name must not be blank
+@pytest.mark.specguard_llm
+@pytest.mark.llm_extra
+def test_create_pet_llm_1_blank_name_rejected(api):
+    response = api.request(
+        "POST",
+        '/pets',
+        json={'name': '   ', 'status': 'available'},
+    )
+    assert response.status_code == 422
+```
+
+`minLength: 1` would pass that payload. A human reading "must not be blank"
+would not. That gap is the entire remit.
+
+Parsing the reply is the part that gets tested, and **the rule is drop, never
+guess.** A case SpecGuard cannot read is discarded rather than
+half-reconstructed — the floor already stands alone, so losing a suggestion
+costs nothing, while inventing one puts an unreviewable test in front of someone
+who trusts the tool. A case with no stated `reason` is dropped for the same
+reason: the reason is what you read to approve or delete it.
+
+Measured against a server returning each failure mode in turn:
+
+| Provider reply | Exit | Tests generated | Extras |
+|---|:--:|:--:|:--:|
+| well-formed (prose + markdown fence) | 0 | 22 | 2 |
+| refusal in prose | 0 | 20 | 0 |
+| truncated mid-array | 0 | 20 | 0 |
+| case with no `reason` | 0 | 20 | 0 |
+| HTTP 500 | 0 | 20 | 0 |
+
+Twenty every time. Defaults are `claude-opus-5` and `qwen2.5-coder`; override
+with `--model`. The Claude provider needs `pip install 'specguard[claude]'` and
+`ANTHROPIC_API_KEY`; Ollama needs neither and keeps your spec on your machine.
 
 ### What gets scaffolded
 
@@ -248,45 +380,77 @@ than ambiguous.
 
 ### Severity is code, not judgment
 
-| Change | Severity |
-|---|---|
-| Required field removed or renamed; type changed | 🔴 **breaking** |
-| New enum value; widened type | 🟡 **warning** |
-| New optional field | 🔵 **info** |
+| `kind` | Severity | |
+|---|---|---|
+| `field_removed` (was required) | 🔴 **breaking** | consumers read a field that's gone |
+| `field_no_longer_required` | 🔴 **breaking** | it's now missing from some responses |
+| `type_changed` | 🔴 **breaking** | `number` → `string` breaks parsing |
+| `enum_removed` | 🔴 **breaking** | consumers may still send the dropped value |
+| `enum_added` | 🟡 **warning** | a value nobody's `switch` handles |
+| `type_widened` | 🟡 **warning** | still returns the old type, plus another |
+| `field_added` | 🔵 **info** | additive; nothing breaks |
+| `field_removed` (was optional) | 🔵 **info** | nobody could rely on it |
 
-These rules live in `drift_engine` as plain Python, so the same drift always
-gets the same severity. The LLM may write an explanation on top; it never
-assigns the severity.
+These live in `drift_engine` as plain Python, so the same drift always gets the
+same severity. A renamed field surfaces as a **breaking** removal plus an
+**info** addition — the tool reports what it observed rather than guessing at
+intent. A container swapping shape (object ↔ array) is reported once and the
+walk stops, instead of emitting noise for every field beneath it.
 
 ### Guarding against false drift
 
-Inferred schemas are only as good as the sample. So: baseline from **N ≥ 20**
-responses, treat single-observation fields as optional, and only infer an `enum`
-when the observed value set is small and stable relative to the sample size —
-otherwise leave it a plain string. A free-text field must never become an enum.
+An inferred schema that is too strict fires drift on every run and trains people
+to ignore the tool — worse than missing a change. So inference is deliberately
+conservative:
+
+- **Sample size is recorded, not assumed.** Below 20 observations an endpoint is
+  flagged `low confidence` in the output rather than presented as fact.
+- **A string becomes an `enum` only on real evidence**: ≤ 10 distinct values,
+  distinct/sample ≤ 0.2, and ≥ 20 samples. Free text stays a string.
+- **One call returning 30 list items counts as 30 observations**, not one —
+  which is what makes collection endpoints cheap to baseline. Singleton
+  endpoints degrade honestly instead of pretending.
+- **Nesting is real.** Inference and diffing both recurse through objects and
+  arrays, and findings carry dotted paths (`[].name`,
+  `customer.address.postcode`).
+
+The failure mode that matters here is silence, so it is reported everywhere:
+endpoints the suite never exercised, endpoints that returned no JSON body, and
+endpoints with nothing in the baseline are each named rather than passing
+quietly as clean.
 
 ---
 
-## Planned CLI
+## CLI
 
 ```bash
-# generate a reviewable suite from a spec                    [available now]
+# generate a reviewable suite from a spec
 specguard generate openapi.yaml --out generated/ --base-url https://api.example.com
 
-# ...with a model proposing extra cases on top of the floor  [planned]
+# ...with a model proposing extra cases on top of the deterministic floor
 specguard generate openapi.yaml --out generated/ --provider claude
 
-# record current responses as the contract baseline          [planned]
-specguard baseline --base-url https://api.staging.example.com --out baseline.json
+# record current responses as the contract baseline
+specguard baseline --spec openapi.yaml --suite generated/ \
+                   --base-url https://api.staging.example.com \
+                   --auth-token $TOKEN --out baseline.json
 
-# compare live responses to the baseline                     [planned]
-specguard guard --base-url https://api.staging.example.com \
+# compare live responses to the baseline; nonzero exit on breaking drift
+specguard guard --spec openapi.yaml --suite generated/ \
+                --base-url https://api.staging.example.com \
+                --auth-token $TOKEN \
                 --baseline baseline.json --report drift.json \
-                --fail-on breaking
+                --junitxml drift.xml --fail-on breaking
 
-# run the generated suite and emit JUnit                     [planned]
-specguard run generated/ --junitxml results.xml
+# a breakable API to try all of the above against
+specguard demo --port 8080 [--rename name:pet_name | --add seen_at | --lax]
 ```
+
+`baseline` and `guard` both take `--suite`, because they drive *your* tests to
+produce the traffic they record. `--auth-token` matters more than it looks:
+without credentials a protected endpoint returns 401, records nothing, and is
+**silently unguarded** — so SpecGuard names every endpoint it could not check
+rather than counting it clean.
 
 `--fail-on` is how you keep control of the gate. `--fail-on breaking` blocks a
 removed required field but lets a new enum value through as a warning. The tool
@@ -294,9 +458,12 @@ never decides on its own to fail your build on an ambiguous change.
 
 ```yaml
 - name: Guard against API drift
-  run: specguard guard --base-url ${{ env.STAGING_URL }} \
-                       --baseline baseline.json --report drift.json \
-                       --fail-on breaking
+  run: |
+    specguard guard --spec openapi.yaml --suite tests/api/ \
+                    --base-url ${{ env.STAGING_URL }} \
+                    --auth-token ${{ secrets.STAGING_TOKEN }} \
+                    --baseline baseline.json --report drift.json \
+                    --junitxml drift.xml --fail-on breaking
 
 - name: Publish drift report
   if: always()
@@ -304,14 +471,30 @@ never decides on its own to fail your build on an ambiguous change.
   with: { name: drift-report, path: drift.json }
 ```
 
+JUnit output reports *every* finding as a test case so CI shows the full
+picture, but only those at or above `--fail-on` are marked as failures.
+
 ---
 
 ## Roadmap
 
 - [x] **M1** — OpenAPI parsing → `EndpointModel` (no LLM)
 - [x] **M2** — Generate half: spec → runnable pytest suite, deterministic floor
-- [ ] **M3** — Guard half: `baseline` + drift detection with fixed severities
-- [ ] **M4** — `run` command, JUnit output, CI recipes, published to PyPI
+      plus optional model-proposed extras
+- [x] **M3** — Guard half: `baseline` + drift detection with fixed severities,
+      JUnit output, and a bundled demo API
+- [ ] **M4** — `--template-dir`, README polish, CI recipes, published to PyPI
+
+Known gaps, stated plainly:
+
+- **A thin baseline under-reports.** If an endpoint was seen 3 times, a field
+  that happened to appear in all 3 is recorded as required — but one seen twice
+  is not, so losing it later registers as `info` rather than `breaking`. The
+  `low confidence` warning fires correctly; the severity is still generous.
+- **No `--template-dir`.** The generated house style (pytest over `requests`) is
+  fixed unless you fork.
+- **Local `$ref`s only.** Remote (`http://`) refs and non-JSON media types are
+  skipped rather than raising.
 
 Post-v1: value-anomaly detection (a price that jumped 100×), GraphQL via
 introspection, drift history dashboard, MCP server.
@@ -325,21 +508,28 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 .venv/bin/pytest
 ```
 
-Requires Python 3.10+.
+Requires Python 3.10+. **209 tests, none of which call a live model or reach the
+network.**
 
-The suite includes an **end-to-end acceptance test**: it generates a suite from
-`examples/petstore.yaml`, starts a fake API that honours that spec, and runs the
-generated tests against it. Then it breaks the API's validation and asserts the
-generated suite goes red — because a suite where everything passes proves
-nothing.
+The suite includes two **end-to-end acceptance tests**, both built on the same
+idea — a test that only ever passes proves nothing:
+
+- **Generate:** produce a suite from `examples/petstore.yaml`, serve an API that
+  honours that spec, run the generated tests against it. Then break the API's
+  validation and assert the suite goes red.
+- **Guard:** baseline a live API, rename a required field, and assert exactly
+  the two breaking findings at `name` and `[].name`.
 
 How SpecGuard is tested, by module type:
 
 - **Deterministic modules** — golden outputs against a fixed example spec.
 - **The renderer** — snapshot tests; the same `TestCase` list must produce
-  byte-identical pytest.
-- **The LLM module** — tests cover *parsing of model output* (malformed JSON,
-  extra prose) using recorded fixtures. Tests never call a live model.
+  byte-identical pytest. A test AST-parses the output and pins the import set,
+  so the suite can never quietly start depending on SpecGuard.
+- **The LLM module** — tests cover *parsing of model output* (prose preambles,
+  markdown fences, truncation, refusals, wrapper objects) from recorded
+  fixtures, plus both providers against a fake transport that pins the request
+  shape. No test calls a live model or needs an API key.
 
 ---
 
