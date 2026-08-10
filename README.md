@@ -125,7 +125,7 @@ Two files are non-deterministic, both behind one `complete()` method, and
 
 ```bash
 git clone https://github.com/athrvrne/specguard && cd specguard
-python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+python3 -m venv .venv && .venv/bin/pip install -e .
 ```
 
 Generate a suite from the bundled spec:
@@ -531,7 +531,7 @@ introspection, drift history dashboard, MCP server.
 ## Developing
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+python3 -m venv .venv && .venv/bin/pip install -e .
 .venv/bin/pytest
 ```
 
