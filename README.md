@@ -112,6 +112,7 @@ How little is non-deterministic, concretely:
 | `reporter` | Findings → JSON / console / JUnit | ✅ |
 | `demo_api` | A breakable API to try it against | ✅ |
 | `cli` | Command surface, wiring | ✅ |
+| `llm/provider` | The `complete()` protocol both models implement | ✅ *(interface)* |
 | `llm/parsing` | Model reply → validated cases | ✅ |
 | `llm/claude`, `llm/ollama` | The only calls that leave the machine | ❌ *isolated* |
 
@@ -151,6 +152,14 @@ your real suite.
 ```
 
 Run it against your API:
+
+```bash
+.venv/bin/specguard run generated/ --base-url https://api.staging.example.com \
+                                   --auth-token $TOKEN
+```
+
+That is plain pytest with the environment wired up. If you'd rather drive pytest
+yourself, the suite reads two variables and nothing else:
 
 ```bash
 SPECGUARD_BASE_URL=https://api.staging.example.com \
@@ -399,9 +408,12 @@ than ambiguous.
 | `field_removed` (was optional) | 🔵 **info** | nobody could rely on it |
 
 These live in `drift_engine` as plain Python, so the same drift always gets the
-same severity. A renamed field surfaces as a **breaking** removal plus an
-**info** addition — the tool reports what it observed rather than guessing at
-intent. A container swapping shape (object ↔ array) is reported once and the
+same severity. Every report — console, JSON, and JUnit — orders findings
+most-severe-first across the whole run, so the thing that failed your build
+reads first rather than being scattered between endpoints.
+
+A renamed field surfaces as a **breaking** removal plus an **info** addition —
+the tool reports what it observed rather than guessing at intent. A container swapping shape (object ↔ array) is reported once and the
 walk stops, instead of emitting noise for every field beneath it.
 
 ### Guarding against false drift
